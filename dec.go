@@ -2,6 +2,7 @@ package fdkaac
 
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 )
 
@@ -57,6 +58,14 @@ var decErrors = [...]error{
 }
 
 var DecNotEnoughBits = decErrors[C.AAC_DEC_NOT_ENOUGH_BITS]
+
+// getDecError safely converts C error code to Go error
+func getDecError(errNo C.AAC_DECODER_ERROR) error {
+	if int(errNo) >= 0 && int(errNo) < len(decErrors) {
+		return decErrors[errNo]
+	}
+	return fmt.Errorf("unknown decoder error: %d", errNo)
+}
 
 func getErrNo(err error) int {
 	for i, v := range decErrors {
@@ -264,6 +273,13 @@ type AacDecoder struct {
 
 // DecodeFrame
 func (dec *AacDecoder) DecodeFrame(in, out []byte) (n int, err error) {
+	if dec == nil || dec.ph == nil {
+		return 0, errors.New("decoder not initialized")
+	}
+	if len(out) == 0 {
+		return 0, errors.New("output buffer is empty")
+	}
+	
 	var errNo C.AAC_DECODER_ERROR = C.AAC_DEC_OK
 	// Fill
 	var inPtr *C.uchar
@@ -273,19 +289,19 @@ func (dec *AacDecoder) DecodeFrame(in, out []byte) (n int, err error) {
 	inLen := C.uint(len(in))
 	bytesValid := inLen
 	if errNo = C.aacDecoder_FillWrapped(dec.ph, inPtr, inLen, &bytesValid); errNo != C.AAC_DEC_OK {
-		return 0, decErrors[errNo]
+		return 0, getDecError(errNo)
 	}
 	if bytesValid > 0 {
 		return 0, errors.New("input buffer contains redundant data")
 	}
 	// Decode
 	var outPtr *C.INT_PCM
-	if len(in) > 0 {
+	if len(out) > 0 {
 		outPtr = (*C.INT_PCM)(unsafe.Pointer(&out[0]))
 	}
 	outLen := C.INT(len(out))
 	if errNo = C.aacDecoder_DecodeFrame(dec.ph, outPtr, outLen, 0); errNo != C.AAC_DEC_OK {
-		return 0, decErrors[errNo]
+		return 0, getDecError(errNo)
 	}
 	if dec.info == nil {
 		if dec.info, err = dec.GetStreamInfo(); err != nil {
@@ -299,11 +315,17 @@ func (dec *AacDecoder) DecodeFrame(in, out []byte) (n int, err error) {
 
 // Flush
 func (dec *AacDecoder) Flush() error {
-	return decErrors[C.aacDecoder_SetParam(dec.ph, C.AAC_TPDEC_CLEAR_BUFFER, C.int(1))]
+	if dec == nil || dec.ph == nil {
+		return errors.New("decoder not initialized")
+	}
+	return getDecError(C.aacDecoder_SetParam(dec.ph, C.AAC_TPDEC_CLEAR_BUFFER, C.int(1)))
 }
 
 // GetStreamInfo
 func (dec *AacDecoder) GetStreamInfo() (*CStreamInfo, error) {
+	if dec == nil || dec.ph == nil {
+		return nil, errors.New("decoder not initialized")
+	}
 	originInfo := C.aacDecoder_GetStreamInfo(dec.ph)
 	if originInfo == nil {
 		return nil, errors.New("get stream info failed")
@@ -336,16 +358,22 @@ func (dec *AacDecoder) GetStreamInfo() (*CStreamInfo, error) {
 
 // ConfigRaw
 func (dec *AacDecoder) ConfigRaw(conf []byte) error {
-	if conf == nil {
-		return errors.New("raw config should not be nil")
+	if dec == nil || dec.ph == nil {
+		return errors.New("decoder not initialized")
+	}
+	if len(conf) == 0 {
+		return errors.New("raw config should not be empty")
 	}
 	confPtr := (*C.uchar)(unsafe.Pointer(&conf[0]))
 	length := C.uint(len(conf))
-	return decErrors[C.aacDecoder_ConfigRawWrapped(dec.ph, confPtr, length)]
+	return getDecError(C.aacDecoder_ConfigRawWrapped(dec.ph, confPtr, length))
 }
 
 // Close
 func (dec *AacDecoder) Close() error {
+	if dec == nil || dec.ph == nil {
+		return nil
+	}
 	C.aacDecoder_Close(dec.ph)
 	dec.ph = nil
 	return nil
@@ -372,115 +400,115 @@ func CreateAccDecoder(config *AacDecoderConfig) (*AacDecoder, error) {
 	if dec.PcmDualChannelOutputMode != PcmDualChannelLeaveBoth {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_DUAL_CHANNEL_OUTPUT_MODE,
 			C.int(dec.PcmDualChannelOutputMode)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.PcmOutputChannelMappingMpeg {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_OUTPUT_CHANNEL_MAPPING,
 			C.int(0)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.PcmLimiterMode != PcmLimiterAutoConfig {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_LIMITER_ENABLE,
 			C.int(dec.PcmLimiterMode-1)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.PcmLimiterAttackTime > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_LIMITER_ATTACK_TIME,
 			C.int(dec.PcmLimiterAttackTime)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.PcmLimiterReleasTime > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_LIMITER_RELEAS_TIME,
 			C.int(dec.PcmLimiterReleasTime)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.PcmMinOutputChannels > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_MIN_OUTPUT_CHANNELS,
 			C.int(dec.PcmMinOutputChannels)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.PcmMaxOutputChannels > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_PCM_MAX_OUTPUT_CHANNELS,
 			C.int(dec.PcmMaxOutputChannels)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.MetadataProfile != MdProfileMpegStandard {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_METADATA_PROFILE,
 			C.int(dec.MetadataProfile)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.MetadataExpiryTime > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_METADATA_EXPIRY_TIME,
 			C.int(dec.MetadataExpiryTime)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.ConcealMethod != ConcealSpectralMuting {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_CONCEAL_METHOD,
 			C.int(dec.ConcealMethod)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.DrcBoostFactor > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_DRC_BOOST_FACTOR,
 			C.int(dec.DrcBoostFactor)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.DrcAttenuationFactor > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_DRC_ATTENUATION_FACTOR,
 			C.int(dec.DrcAttenuationFactor)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.DrcReferenceLevel > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_DRC_REFERENCE_LEVEL,
 			C.int(dec.DrcReferenceLevel)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.EnableDrcHeavyCompression {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_DRC_HEAVY_COMPRESSION,
 			C.int(1)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.DrcDefaultPresentationMode != DrcParameterHandlingDisabled {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_DRC_DEFAULT_PRESENTATION_MODE,
 			C.int(dec.DrcDefaultPresentationMode-1)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.DrcEncTargetLevel > 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_DRC_ENC_TARGET_LEVEL,
 			C.int(dec.DrcEncTargetLevel)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.UnidrcSetEffect != 0 {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_UNIDRC_SET_EFFECT,
 			C.int(dec.UnidrcSetEffect)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.EnableUnidrcAlbumMode {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_UNIDRC_ALBUM_MODE,
 			C.int(1)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 	if dec.QmfLowpowerMode != QmfLowpowerInternal {
 		if errNo = C.aacDecoder_SetParam(dec.ph, C.AAC_QMF_LOWPOWER,
 			C.int(dec.QmfLowpowerMode)); errNo != C.AAC_DEC_OK {
-			return nil, decErrors[errNo]
+			return nil, getDecError(errNo)
 		}
 	}
 

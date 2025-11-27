@@ -4,8 +4,8 @@ package fdkaac
 #include "deps/include/aacenc_lib.h"
 
 AACENC_ERROR aacEncEncodeWrapped(const HANDLE_AACENCODER hAacEncoder,
-			void* in, int inLen, int sampleBitDepth,
-			void* out, int outLen, int* numOutBytes) {
+		void* in, int inLen, int sampleBitDepth,
+		void* out, int outLen, int* numOutBytes) {
 	AACENC_ERROR err;
 	AACENC_BufDesc inBuf = { 0 }, outBuf = { 0 };
 	AACENC_InArgs inArgs = { 0 };
@@ -35,6 +35,7 @@ AACENC_ERROR aacEncEncodeWrapped(const HANDLE_AACENCODER hAacEncoder,
 import "C"
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 )
 
@@ -56,6 +57,14 @@ var encErrors = [...]error{
 
 // Encoder End Of File.
 var EncEOF = encErrors[C.AACENC_ENCODE_EOF]
+
+// getEncError safely converts C error code to Go error
+func getEncError(errNo C.AACENC_ERROR) error {
+	if int(errNo) >= 0 && int(errNo) < len(encErrors) {
+		return encErrors[errNo]
+	}
+	return fmt.Errorf("unknown encoder error: %d", errNo)
+}
 
 // Bitrate Mode
 type BitrateMode int
@@ -92,8 +101,6 @@ const (
 type AacEncoderConfig struct {
 	// Number of channels to be allocated.
 	MaxChannels int
-	// Sample bitdepth.
-	SampleBitDepth int
 	// Audio object type.
 	AOT AudioObjectType
 	// Total encoder bitrate.
@@ -140,101 +147,203 @@ type AacEncoderConfig struct {
 type EncInfo struct {
 	// Maximum number of encoder bitstream bytes within one frame.
 	// Size depends on maximum number of supported channels in encoder instance.
-	MaxOutBufBytes uint
+	MaxOutBufBytes int
 	// Maximum number of ancillary data bytes which can be
 	// inserted into bitstream within one frame.
-	MaxAncBytes uint
+	MaxAncBytes int
 	// Internal input buffer fill level in samples per channel.
-	InBufFillLevel uint
+	InBufFillLevel int
 	// Number of input channels expected in encoding process.
-	InputChannels uint
+	InputChannels int
 	// Amount of input audio samples consumed each frame per channel,
 	// depending on audio object type configuration.
-	FrameLength uint
+	FrameLength int
+	// Bytes per frame, including all channels
+	FrameSize int
 	// Codec delay in PCM samples/channel.
-	NDelay uint
+	NDelay int
 	// Codec delay in PCM samples/channel.
-	NDelayCore uint
+	NDelayCore int
 	// Configuration buffer in binary format as an AudioSpecificConfig or
 	// StreamMuxConfig according to the selected transport type.
 	ConfBuf []byte
-	// Number of valid bytes in confBuf.
-	ConfSize uint
 }
 
 // AAC Encoder
 type AacEncoder struct {
 	// private handler
 	ph C.HANDLE_AACENCODER
-	// config
-	AacEncoderConfig
 	// info
-	info *EncInfo
+	EncInfo
+	prevDataBuffer []byte
 }
 
-// Encode
-func (enc *AacEncoder) Encode(in, out []byte) (n int, err error) {
-	var inPtr, outPtr unsafe.Pointer
-	if len(in) > 0 {
-		inPtr = unsafe.Pointer(&in[0])
+func (enc *AacEncoder) Encode(in, out []byte) (n int, nFrames int, err error) {
+	if enc == nil || enc.ph == nil {
+		return 0, 0, errors.New("encoder not initialized")
 	}
-	if len(out) > 0 {
-		outPtr = unsafe.Pointer(&out[0])
-	}
-	errNo := C.aacEncEncodeWrapped(enc.ph,
-		inPtr, C.int(len(in)), C.int(enc.SampleBitDepth),
-		outPtr, C.int(len(out)), (*C.int)(unsafe.Pointer(&n)))
 
-	return n, encErrors[errNo]
+	szIn := len(in)
+	szOut := len(out)
+
+	if szIn == 0 {
+		return 0, 0, errors.New("input buffer is empty")
+	}
+	if szOut < enc.EstimateOutBufBytes(szIn) {
+		return 0, 0, errors.New("output buffer is too small")
+	}
+
+	frameSize := enc.FrameSize
+	var nWrite C.int
+	var inPtr, outPtr unsafe.Pointer
+
+	prevLen := len(enc.prevDataBuffer)
+	if prevLen > 0 {
+		if (prevLen + szIn) >= frameSize {
+			nFill := frameSize - prevLen
+			enc.prevDataBuffer = append(enc.prevDataBuffer, in[:nFill]...)
+
+			inPtr = unsafe.Pointer(&enc.prevDataBuffer[0])
+			outPtr = unsafe.Pointer(&out[0])
+			errNo := C.aacEncEncodeWrapped(enc.ph,
+				inPtr, C.int(frameSize), C.int(SampleBitDepth),
+				outPtr, C.int(szOut), &nWrite)
+			if errNo != 0 {
+				enc.prevDataBuffer = enc.prevDataBuffer[:prevLen]
+				return 0, 0, getEncError(errNo)
+			}
+			enc.prevDataBuffer = enc.prevDataBuffer[:0]
+
+			n = int(nWrite)
+			nFrames = 1
+			out = out[n:]
+			in = in[nFill:]
+			szIn = len(in)
+			szOut = len(out)
+		} else {
+			enc.prevDataBuffer = append(enc.prevDataBuffer, in...)
+			return 0, 0, nil
+		}
+	}
+
+	if szIn < frameSize {
+		enc.prevDataBuffer = append(enc.prevDataBuffer, in...)
+		return n, nFrames, nil
+	}
+
+	for szIn >= frameSize {
+		inPtr = unsafe.Pointer(&in[0])
+		outPtr = unsafe.Pointer(&out[0])
+		errNo := C.aacEncEncodeWrapped(enc.ph,
+			inPtr, C.int(frameSize), C.int(SampleBitDepth),
+			outPtr, C.int(szOut), &nWrite)
+		if errNo != 0 {
+			return 0, 0, getEncError(errNo)
+		}
+		nWr := int(nWrite)
+		n += nWr
+		nFrames++
+		out = out[nWr:]
+		in = in[frameSize:]
+		szIn -= frameSize
+		szOut -= nWr
+	}
+
+	if szIn > 0 {
+		enc.prevDataBuffer = append(enc.prevDataBuffer, in...)
+	}
+	return n, nFrames, nil
 }
 
 // Flush
-func (enc *AacEncoder) Flush(out []byte) (n int, err error) {
-	validBytes := 0
-	for {
-		validBytes, err = enc.Encode(nil, out[n:])
-		n += validBytes
-		if err == EncEOF {
-			return n, nil
-		} else if err != nil {
-			return n, err
+func (enc *AacEncoder) Flush(out []byte) (n int, nFrames int, err error) {
+	szOut := len(out)
+	if szOut < enc.EstimateOutBufBytes(0) {
+		return 0, 0, errors.New("output buffer is too small")
+	}
+
+	var nWrite C.int
+	var outPtr unsafe.Pointer
+
+	if len(enc.prevDataBuffer) > 0 {
+		var inPtr unsafe.Pointer
+		inPtr = unsafe.Pointer(&enc.prevDataBuffer[0])
+		outPtr = unsafe.Pointer(&out[0])
+		errNo := C.aacEncEncodeWrapped(enc.ph,
+			inPtr, C.int(len(enc.prevDataBuffer)), C.int(SampleBitDepth),
+			outPtr, C.int(szOut), &nWrite)
+		if errNo != 0 {
+			return 0, 0, getEncError(errNo)
+		}
+		enc.prevDataBuffer = enc.prevDataBuffer[:0]
+
+		n = int(nWrite)
+		if n > 0 {
+			nFrames = 1
+			out = out[n:]
+			szOut = len(out)
 		}
 	}
-}
 
-func (enc *AacEncoder) GetInfo() (*EncInfo, error) {
-	info := C.AACENC_InfoStruct{}
-	if errNo := C.aacEncInfo(enc.ph, &info); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+	for {
+		outPtr = unsafe.Pointer(&out[0])
+		errNo := C.aacEncEncodeWrapped(enc.ph,
+			nil, 0, C.int(SampleBitDepth),
+			outPtr, C.int(szOut), &nWrite)
+		if errNo != 0 {
+			if errNo == C.AACENC_ENCODE_EOF {
+				return n, nFrames, nil
+			}
+			return 0, 0, getEncError(errNo)
+		}
+
+		nWr := int(nWrite)
+		if nWr == 0 {
+			return n, nFrames, nil
+		}
+		n += nWr
+		nFrames++
+		out = out[nWr:]
+		szOut -= nWr
 	}
-
-	return &EncInfo{
-		MaxOutBufBytes: uint(info.maxOutBufBytes),
-		MaxAncBytes:    uint(info.maxAncBytes),
-		InBufFillLevel: uint(info.inBufFillLevel),
-		InputChannels:  uint(info.inputChannels),
-		FrameLength:    uint(info.frameLength),
-		NDelay:         uint(info.nDelay),
-		NDelayCore:     uint(info.nDelay),
-		ConfBuf:        C.GoBytes(unsafe.Pointer(&info.confBuf[0]), C.int(info.confSize)),
-		ConfSize:       uint(info.confSize),
-	}, nil
 }
 
 // Close
 func (enc *AacEncoder) Close() error {
-	return encErrors[C.aacEncClose(&enc.ph)]
+	if enc == nil || enc.ph == nil {
+		return nil
+	}
+	err := getEncError(C.aacEncClose(&enc.ph))
+	enc.ph = nil
+	return err
+}
+
+func (enc *AacEncoder) EstimateOutBufBytes(inBytes int) int {
+	// The maximum packet size is 768 bytes per channel.
+	nFrames := inBytes/enc.FrameSize + 1 + 3
+	return nFrames * enc.MaxOutBufBytes
 }
 
 // Create AAC Encoder
-func CreateAccEncoder(config *AacEncoderConfig) (enc *AacEncoder, err error) {
-	var errNo C.AACENC_ERROR = C.AACENC_OK
-	enc = &AacEncoder{
-		AacEncoderConfig: *populateEncConfig(config),
+func CreateAacEncoder(config *AacEncoderConfig) (enc *AacEncoder, err error) {
+	config = populateEncConfig(config)
+
+	// Validate configuration
+	if config.MaxChannels <= 0 || config.MaxChannels > 8 {
+		return nil, fmt.Errorf("invalid MaxChannels: %d (must be 1-8)", config.MaxChannels)
+	}
+	if config.SampleRate <= 0 {
+		return nil, fmt.Errorf("invalid SampleRate: %d", config.SampleRate)
+	}
+	if config.MetaDataMode != MetaDataModeNone {
+		return nil, errors.New("metadata mode is not supported yet")
 	}
 
-	if errNo = C.aacEncOpen(&enc.ph, 0, C.uint(enc.MaxChannels)); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+	enc = &AacEncoder{}
+
+	var errNo C.AACENC_ERROR
+	if errNo = C.aacEncOpen(&enc.ph, 0, C.uint(config.MaxChannels)); errNo != C.AACENC_OK {
+		return nil, getEncError(errNo)
 	}
 
 	defer func() {
@@ -244,124 +353,139 @@ func CreateAccEncoder(config *AacEncoderConfig) (enc *AacEncoder, err error) {
 	}()
 
 	if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_AOT,
-		C.uint(enc.AOT)); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+		C.uint(config.AOT)); errNo != C.AACENC_OK {
+		return nil, getEncError(errNo)
 	}
-	if enc.BitrateMode != BitrateModeConstant {
-		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_BITRATEMODE,
-			C.uint(enc.BitrateMode)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
-		}
-	}
-	if enc.BitrateMode == BitrateModeConstant {
+	if config.BitrateMode == BitrateModeConstant {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_BITRATE,
-			C.uint(enc.Bitrate)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.Bitrate)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
+		}
+	} else {
+		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_BITRATEMODE,
+			C.uint(config.BitrateMode)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
 	if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_SAMPLERATE,
-		C.uint(enc.SampleRate)); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+		C.uint(config.SampleRate)); errNo != C.AACENC_OK {
+		return nil, getEncError(errNo)
 	}
-	if enc.SbrMode != SbrModeDefault {
+	if config.SbrMode != SbrModeDefault {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_SBR_MODE,
-			C.uint(enc.SbrMode-1)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.SbrMode-1)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.GranuleLength != 0 {
+	if config.GranuleLength != 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_GRANULE_LENGTH,
-			C.uint(enc.GranuleLength)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.GranuleLength)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
 	if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_CHANNELMODE,
-		C.uint(enc.ChannelMode)); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+		C.uint(config.ChannelMode)); errNo != C.AACENC_OK {
+		return nil, getEncError(errNo)
 	}
-	if enc.ChannelOrder != ChannelOrderMpeg {
+	if config.ChannelOrder != ChannelOrderMpeg {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_CHANNELORDER,
-			C.uint(enc.ChannelOrder)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.ChannelOrder)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.SbrRatio != 0 {
+	if config.SbrRatio != 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_SBR_RATIO,
-			C.uint(enc.SbrRatio)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.SbrRatio)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.IsAfterBurner {
+	if config.IsAfterBurner {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_AFTERBURNER,
 			C.uint(1)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.Bandwith > 0 {
+	if config.Bandwith > 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_BANDWIDTH,
-			C.uint(enc.Bandwith)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.Bandwith)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.PeakBitrate > 0 {
+	if config.PeakBitrate > 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_PEAK_BITRATE,
-			C.uint(enc.PeakBitrate)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.PeakBitrate)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
 	if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_TRANSMUX,
-		C.uint(enc.TransMux)); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+		C.uint(config.TransMux)); errNo != C.AACENC_OK {
+		return nil, getEncError(errNo)
 	}
-	if enc.HeaderPeriod > 0 {
+	if config.HeaderPeriod > 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_HEADER_PERIOD,
-			C.uint(enc.HeaderPeriod)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.HeaderPeriod)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.SignalingMode != SignalingModeImplicitCompatible {
+	if config.SignalingMode != SignalingModeImplicitCompatible {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_SIGNALING_MODE,
-			C.uint(enc.SignalingMode)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.SignalingMode)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.TransportSubFrames > 0 {
+	if config.TransportSubFrames > 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_TPSUBFRAMES,
-			C.uint(enc.TransportSubFrames)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.TransportSubFrames)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.AudioMuxVersion > 0 {
+	if config.AudioMuxVersion > 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_AUDIOMUXVER,
-			C.uint(enc.AudioMuxVersion)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.AudioMuxVersion)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.IsProtection {
+	if config.IsProtection {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_PROTECTION,
 			C.uint(1)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			return nil, getEncError(errNo)
 		}
 	}
-	if enc.AncillaryBitrate > 0 {
+	if config.AncillaryBitrate > 0 {
 		if errNo = C.aacEncoder_SetParam(enc.ph, C.AACENC_ANCILLARY_BITRATE,
-			C.uint(enc.AncillaryBitrate)); errNo != C.AACENC_OK {
-			return nil, encErrors[errNo]
+			C.uint(config.AncillaryBitrate)); errNo != C.AACENC_OK {
+			return nil, getEncError(errNo)
 		}
-	}
-	if enc.MetaDataMode != MetaDataModeNone {
-		panic("TODO. support metadata mode")
 	}
 
 	if errNo = C.aacEncEncode(enc.ph, nil, nil, nil, nil); errNo != C.AACENC_OK {
-		return nil, encErrors[errNo]
+		return nil, getEncError(errNo)
 	}
 
-	if enc.info, err = enc.GetInfo(); err != nil {
-		return nil, err
+	if errNo = enc.getInfo(); errNo != C.AACENC_OK {
+		return nil, getEncError(errNo)
 	}
 
-	return enc, encErrors[errNo]
+	enc.prevDataBuffer = make([]byte, 0, enc.FrameSize)
+	return enc, nil
+}
+
+func (enc *AacEncoder) getInfo() C.AACENC_ERROR {
+	info := C.AACENC_InfoStruct{}
+	if errNo := C.aacEncInfo(enc.ph, &info); errNo != C.AACENC_OK {
+		return errNo
+	}
+
+	enc.MaxOutBufBytes = int(info.maxOutBufBytes)
+	enc.MaxAncBytes = int(info.maxAncBytes)
+	enc.InBufFillLevel = int(info.inBufFillLevel)
+	enc.InputChannels = int(info.inputChannels)
+	enc.FrameLength = int(info.frameLength)
+	enc.NDelay = int(info.nDelay)
+	enc.NDelayCore = int(info.nDelayCore)
+	enc.ConfBuf = C.GoBytes(unsafe.Pointer(&info.confBuf[0]), C.int(info.confSize))
+	enc.FrameSize = enc.FrameLength * enc.InputChannels * SampleBitDepth / 8
+	return C.AACENC_OK
 }
 
 func populateEncConfig(c *AacEncoderConfig) *AacEncoderConfig {
@@ -370,9 +494,6 @@ func populateEncConfig(c *AacEncoderConfig) *AacEncoderConfig {
 	}
 	if c.MaxChannels == 0 {
 		c.MaxChannels = defaultMaxChannels
-	}
-	if c.SampleBitDepth == 0 {
-		c.SampleBitDepth = defaultSampleBitdepth
 	}
 	if c.AOT == 0 {
 		c.AOT = defaultAOT

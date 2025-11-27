@@ -260,9 +260,10 @@ const (
 )
 
 const (
-	defaultMaxChannels    = 2
-	defaultSampleBitdepth = 16
-	defaultAOT            = AotAacLc
-	defaultSamplerate     = 44100
-	defaultBitrate        = 64000
+	defaultMaxChannels = 2
+	defaultAOT         = AotAacLc
+	defaultSamplerate  = 44100
+	defaultBitrate     = 128000
+
+	SampleBitDepth = 16
 )

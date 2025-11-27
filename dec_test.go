@@ -1,111 +1,171 @@
 package fdkaac
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"testing"
 )
 
-var _ = Describe("", func() {
-	var (
-		decoder *AacDecoder
-		err     error
-	)
-
-	BeforeEach(func() {
-		decoder = nil
-		err = nil
-	})
-
-	It("Decoder create and close", func() {
-		decoder, err = CreateAccDecoder(nil)
-		Expect(err).To(BeNil())
-		Expect(decoder.ph).NotTo(BeNil())
+func TestAacDecoder(t *testing.T) {
+	t.Run("Decoder create and close", func(t *testing.T) {
+		decoder, err := CreateAccDecoder(nil)
+		if err != nil {
+			t.Fatalf("CreateAccDecoder failed: %v", err)
+		}
+		if decoder.ph == nil {
+			t.Error("decoder.ph should not be nil")
+		}
 
 		err = decoder.Close()
-		Expect(err).To(BeNil())
-		Expect(decoder.ph).To(BeNil())
+		if err != nil {
+			t.Errorf("Close failed: %v", err)
+		}
+		if decoder.ph != nil {
+			t.Error("decoder.ph should be nil after close")
+		}
 	})
 
-	It("Decoder config raw", func() {
-		decoder, err = CreateAccDecoder(&AacDecoderConfig{
+	t.Run("Decoder config raw", func(t *testing.T) {
+		decoder, err := CreateAccDecoder(&AacDecoderConfig{
 			TransportFmt: TtMp4Raw,
 		})
-		defer func() { decoder.Close() }()
+		if err != nil {
+			t.Fatalf("CreateAccDecoder failed: %v", err)
+		}
+		defer decoder.Close()
 
 		// 0b 00010 0100 0010 000
 		err = decoder.ConfigRaw([]byte{0x12, 0x10})
-		Expect(err).To(BeNil())
+		if err != nil {
+			t.Errorf("ConfigRaw failed: %v", err)
+		}
 
 		info, err := decoder.GetStreamInfo()
-		Expect(err).To(BeNil())
-		Expect(info).NotTo(BeNil())
-		Expect(info.AOT).To(Equal(AotAacLc))
-		Expect(info.AacSampleRate).To(Equal(44100))
-		Expect(info.ChannelConfig).To(Equal(2))
-		Expect(info.AacSamplesPerFrame).To(Equal(1024))
+		if err != nil {
+			t.Errorf("GetStreamInfo failed: %v", err)
+		}
+		if info == nil {
+			t.Fatal("info should not be nil")
+		}
+		if info.AOT != AotAacLc {
+			t.Errorf("expected AOT %v, got %v", AotAacLc, info.AOT)
+		}
+		if info.AacSampleRate != 44100 {
+			t.Errorf("expected SampleRate 44100, got %d", info.AacSampleRate)
+		}
+		if info.ChannelConfig != 2 {
+			t.Errorf("expected ChannelConfig 2, got %d", info.ChannelConfig)
+		}
+		if info.AacSamplesPerFrame != 1024 {
+			t.Errorf("expected SamplesPerFrame 1024, got %d", info.AacSamplesPerFrame)
+		}
 	})
 
-	It("Decoder decode adts", func() {
-		decoder, err = CreateAccDecoder(&AacDecoderConfig{
+	t.Run("Decoder decode adts", func(t *testing.T) {
+		decoder, err := CreateAccDecoder(&AacDecoderConfig{
 			TransportFmt: TtMp4Adts,
 		})
-		defer func() { decoder.Close() }()
+		if err != nil {
+			t.Fatalf("CreateAccDecoder failed: %v", err)
+		}
+		defer decoder.Close()
 
 		outBuf := make([]byte, 4096)
 
 		n, err := decoder.DecodeFrame(AAC0, outBuf)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(4096))
+		if err != nil {
+			t.Errorf("DecodeFrame failed: %v", err)
+		}
+		if n != 4096 {
+			t.Errorf("expected decoded bytes 4096, got %d", n)
+		}
 
 		n, err = decoder.DecodeFrame(AAC1[0:9], outBuf)
-		Expect(err).To(Equal(DecNotEnoughBits))
-		Expect(n).To(Equal(0))
+		if err != DecNotEnoughBits {
+			t.Errorf("expected error DecNotEnoughBits, got %v", err)
+		}
+		if n != 0 {
+			t.Errorf("expected decoded bytes 0, got %d", n)
+		}
 
 		n, err = decoder.DecodeFrame(AAC1[9:], outBuf)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(4096))
+		if err != nil {
+			t.Errorf("DecodeFrame failed: %v", err)
+		}
+		if n != 4096 {
+			t.Errorf("expected decoded bytes 4096, got %d", n)
+		}
 
 		n, err = decoder.DecodeFrame(AAC2[0:9], outBuf)
-		Expect(err).To(Equal(DecNotEnoughBits))
-		Expect(n).To(Equal(0))
+		if err != DecNotEnoughBits {
+			t.Errorf("expected error DecNotEnoughBits, got %v", err)
+		}
+		if n != 0 {
+			t.Errorf("expected decoded bytes 0, got %d", n)
+		}
 
 		err = decoder.Flush()
-		Expect(err).To(BeNil())
+		if err != nil {
+			t.Errorf("Flush failed: %v", err)
+		}
 
 		n, err = decoder.DecodeFrame(AAC2, outBuf)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(4096))
+		if err != nil {
+			t.Errorf("DecodeFrame failed: %v", err)
+		}
+		if n != 4096 {
+			t.Errorf("expected decoded bytes 4096, got %d", n)
+		}
 	})
 
-	It("Decoder decode raw", func() {
-		decoder, err = CreateAccDecoder(&AacDecoderConfig{
+	t.Run("Decoder decode raw", func(t *testing.T) {
+		decoder, err := CreateAccDecoder(&AacDecoderConfig{
 			TransportFmt: TtMp4Raw,
 		})
-		defer func() { decoder.Close() }()
+		if err != nil {
+			t.Fatalf("CreateAccDecoder failed: %v", err)
+		}
+		defer decoder.Close()
 
 		// 0b 00010 0100 0010 000
 		err = decoder.ConfigRaw([]byte{0x12, 0x10})
-		Expect(err).To(BeNil())
+		if err != nil {
+			t.Errorf("ConfigRaw failed: %v", err)
+		}
 
 		info, err := decoder.GetStreamInfo()
-		Expect(err).To(BeNil())
-		Expect(info).NotTo(BeNil())
+		if err != nil {
+			t.Errorf("GetStreamInfo failed: %v", err)
+		}
+		if info == nil {
+			t.Fatal("info should not be nil")
+		}
 
 		outBuf := make([]byte, 4096)
 
 		n, err := decoder.DecodeFrame(AAC0[7:], outBuf)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(4096))
+		if err != nil {
+			t.Errorf("DecodeFrame failed: %v", err)
+		}
+		if n != 4096 {
+			t.Errorf("expected decoded bytes 4096, got %d", n)
+		}
 
 		n, err = decoder.DecodeFrame(AAC1[7:], outBuf)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(4096))
+		if err != nil {
+			t.Errorf("DecodeFrame failed: %v", err)
+		}
+		if n != 4096 {
+			t.Errorf("expected decoded bytes 4096, got %d", n)
+		}
 
 		n, err = decoder.DecodeFrame(AAC2[7:], outBuf)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(4096))
+		if err != nil {
+			t.Errorf("DecodeFrame failed: %v", err)
+		}
+		if n != 4096 {
+			t.Errorf("expected decoded bytes 4096, got %d", n)
+		}
 	})
-})
+}
 
 var AAC0 = []byte{
 	0xff, 0xf1, 0x50, 0x80, 0x0e, 0x60, 0xfc,

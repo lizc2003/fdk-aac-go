@@ -1,59 +1,145 @@
 package fdkaac
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"os"
+	"sync"
+	"testing"
 )
 
-var _ = Describe("AAC enc test", func() {
-	var (
-		encoder *AacEncoder
-		err     error
-	)
-
-	BeforeEach(func() {
-		encoder = nil
-		err = nil
-	})
-
-	It("Encoder create and close", func() {
-		encoder, err = CreateAccEncoder(&AacEncoderConfig{
+func TestAacEncoder(t *testing.T) {
+	t.Run("Encoder create and close", func(t *testing.T) {
+		encoder, err := CreateAacEncoder(&AacEncoderConfig{
 			TransMux:    TtMp4Adts,
-			AOT:         AotAacLc,
 			SampleRate:  44100,
 			MaxChannels: 2,
+			Bitrate:     64000,
 		})
-		Expect(err).To(BeNil())
-		Expect(encoder.ph).NotTo(BeNil())
+		if err != nil {
+			t.Fatalf("CreateAacEncoder failed: %v", err)
+		}
+		if encoder.ph == nil {
+			t.Error("encoder.ph should not be nil")
+		}
 
-		info, err := encoder.GetInfo()
-		Expect(err).To(BeNil())
-		Expect(info).NotTo(BeNil())
-		Expect(info.FrameLength).To(Equal(uint(1024)))
-		Expect(len(info.ConfBuf)).To(Equal(2))
-		Expect(info.ConfBuf[0]).To(Equal(uint8(0x12)))
-		Expect(info.ConfBuf[1]).To(Equal(uint8(0x10)))
+		if encoder.FrameLength != 1024 {
+			t.Errorf("expected FrameLength 1024, got %d", encoder.FrameLength)
+		}
+		if len(encoder.ConfBuf) != 2 {
+			t.Errorf("expected ConfBuf len 2, got %d", len(encoder.ConfBuf))
+		} else {
+			if encoder.ConfBuf[0] != 0x12 {
+				t.Errorf("expected ConfBuf[0] 0x12, got 0x%x", encoder.ConfBuf[0])
+			}
+			if encoder.ConfBuf[1] != 0x10 {
+				t.Errorf("expected ConfBuf[1] 0x10, got 0x%x", encoder.ConfBuf[1])
+			}
+		}
 
 		err = encoder.Close()
-		Expect(err).To(BeNil())
-		Expect(encoder.ph).To(BeNil())
+		if err != nil {
+			t.Errorf("Close failed: %v", err)
+		}
+		if encoder.ph != nil {
+			t.Error("encoder.ph should be nil after close")
+		}
 	})
 
-	It("Encode", func() {
-		encoder, err = CreateAccEncoder(&AacEncoderConfig{
-			TransMux: TtMp4Adts,
+	t.Run("Encode", func(t *testing.T) {
+		encoder, err := CreateAacEncoder(&AacEncoderConfig{
+			TransMux:    TtMp4Adts,
+			SampleRate:  44100,
+			MaxChannels: 2,
+			Bitrate:     64000,
 		})
+		if err != nil {
+			t.Fatalf("CreateAacEncoder failed: %v", err)
+		}
+		defer encoder.Close()
 
-		output := make([]byte, 1024)
-		n, err := encoder.Encode(PCM0, output)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(185))
+		output := make([]byte, 8192)
+		n, _, err := encoder.Encode(PCM0, output)
+		if err != nil {
+			t.Errorf("Encode failed: %v", err)
+		}
+		if n != 185 {
+			t.Errorf("expected encoded bytes 185, got %d", n)
+		}
 
-		n, err = encoder.Flush(output)
-		Expect(err).To(BeNil())
-		Expect(n).To(Equal(538))
+		n, _, err = encoder.Flush(output)
+		if err != nil {
+			t.Errorf("Flush failed: %v", err)
+		}
+		if n != 538 {
+			t.Errorf("expected flush bytes 538, got %d", n)
+		}
 	})
-})
+}
+
+func TestAacEncoderAdvance(t *testing.T) {
+	inBuf, err := os.ReadFile("samples/sample.pcm")
+	if err != nil {
+		t.Fatalf("open samples/sample.pcm failed: %v", err)
+	}
+
+	chunkSizeStart := 1
+	loop := 4096 + 10
+	waitGroup := sync.WaitGroup{}
+	waitGroup.Add(loop)
+
+	for i := 0; i < loop; i++ {
+		go func(chunkSize int) {
+			defer waitGroup.Done()
+
+			encoder, err := CreateAacEncoder(&AacEncoderConfig{
+				TransMux:    TtMp4Adts,
+				SampleRate:  44100,
+				MaxChannels: 2,
+				Bitrate:     64000,
+			})
+			if err != nil {
+				t.Fatalf("CreateAacEncoder failed: %v", err)
+			}
+			defer encoder.Close()
+
+			outBuf := make([]byte, encoder.EstimateOutBufBytes(chunkSize))
+
+			offset := 0
+			frameCount := 0
+			totalBytes := 0
+			for offset < len(inBuf) {
+				remaining := len(inBuf) - offset
+				if remaining < chunkSize {
+					chunkSize = remaining
+				}
+
+				written, nFrames, err := encoder.Encode(inBuf[offset:offset+chunkSize], outBuf)
+				if err != nil {
+					t.Fatalf("encode failed: %v", err)
+				}
+
+				frameCount += nFrames
+				totalBytes += written
+
+				offset += chunkSize
+			}
+
+			written, nFrames, err := encoder.Flush(outBuf)
+			if err != nil {
+				t.Fatalf("flush failed: %v", err)
+			}
+			frameCount += nFrames
+			totalBytes += written
+
+			if totalBytes != 113000 {
+				t.Errorf("expected %d bytes, got %d", 113000, totalBytes)
+			}
+			if frameCount != 604 {
+				t.Errorf("expected %d frames, got %d", 604, frameCount)
+			}
+		}(chunkSizeStart + i)
+	}
+	waitGroup.Wait()
+}
 
 var PCM0 = []byte{
 	0x32, 0x04, 0xf4, 0xfd, 0x0d, 0x05, 0xaa, 0xfe, 0xfc, 0x05, 0x8b, 0xff, 0x0e, 0x07, 0x9f, 0x00, 0x44, 0x08, 0xdc, 0x01, 0x88, 0x09, 0x21, 0x03, 0xaa, 0x0a, 0x3f, 0x04, 0x75, 0x0b, 0x04, 0x05, 0xc5, 0x0b, 0x54, 0x05, 0xa0, 0x0b, 0x39, 0x05, 0x3e, 0x0b, 0xe6, 0x04, 0xf1, 0x0a, 0xa6, 0x04, 0x06, 0x0b, 0xbf, 0x04, 0x9f, 0x0b, 0x57, 0x05, 0xa7, 0x0c, 0x5f, 0x06, 0xd6, 0x0d, 0xa0, 0x07, 0xdc, 0x0e, 0xcc, 0x08, 0x7f, 0x0f, 0x9f, 0x09, 0xb5, 0x0f, 0xfc, 0x09, 0xa1, 0x0f, 0xed, 0x09, 0x7b, 0x0f, 0x9f, 0x09, 0x72, 0x0f, 0x4c, 0x09, 0x9c, 0x0f, 0x29, 0x09, 0xf5, 0x0f, 0x53, 0x09, 0x70, 0x10, 0xd0, 0x09, 0x05, 0x11, 0x91, 0x0a, 0xb7, 0x11, 0x78, 0x0b, 0x8c, 0x12, 0x63, 0x0c, 0x7b, 0x13, 0x2e, 0x0d, 0x6c, 0x14, 0xc4, 0x0d, 0x32, 0x15, 0x1d, 0x0e, 0xa9, 0x15, 0x43, 0x0e,

@@ -3,32 +3,42 @@ package main
 import (
 	"fmt"
 	"github.com/lizc2003/fdk-aac-go"
+	"os"
 )
 
 func main() {
-	encoder, err := fdkaac.CreateAccEncoder(&fdkaac.AacEncoderConfig{
+	encoder, err := fdkaac.CreateAacEncoder(&fdkaac.AacEncoderConfig{
 		TransMux:    fdkaac.TtMp4Adts,
-		AOT:         fdkaac.AotAacLc,
 		SampleRate:  44100,
 		MaxChannels: 2,
+		Bitrate:     128000,
 	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	defer func() {
-		encoder.Close()
-	}()
+	defer encoder.Close()
 
-	inBuf := []byte{
-		// PCM bytes
-	}
-	outBuf := make([]byte, 4096)
-
-	n, err := encoder.Encode(inBuf, outBuf)
+	inBuf, err := os.ReadFile("samples/sample.pcm")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println(outBuf[0:n])
+
+	outBuf := make([]byte, encoder.EstimateOutBufBytes(len(inBuf)))
+	n, nFrames, err := encoder.Encode(inBuf, outBuf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	n2, nFrames2, err := encoder.Flush(outBuf[n:])
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	outBuf = outBuf[:n+n2]
+	fmt.Printf("total bytes:%d, frames:%d\n", len(outBuf), nFrames+nFrames2)
+	os.WriteFile("output.aac", outBuf, 0644)
 }
