@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/lizc2003/fdk-aac-go"
+	"github.com/lizc2003/audio-fdkaac"
 	"io"
 	"os"
 )

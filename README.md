@@ -27,7 +27,7 @@ package main
 import (
 	"fmt"
 
-	fdkaac "github.com/lizc2003/fdk-aac-go"
+	fdkaac "github.com/lizc2003/audio-fdkaac"
 )
 
 func main() {
@@ -62,7 +62,7 @@ package main
 import (
 	"fmt"
 
-	fdkaac "github.com/lizc2003/fdk-aac-go"
+	fdkaac "github.com/lizc2003/audio-fdkaac"
 )
 
 func main() {

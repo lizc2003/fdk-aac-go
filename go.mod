@@ -1,3 +1,3 @@
-module github.com/lizc2003/fdk-aac-go
+module github.com/lizc2003/audio-fdkaac
 
 go 1.24.2
